@@ -20,3 +20,7 @@ export function previewTemplate(id, ownerId) {
     responseType: 'blob' 
   })
 }
+
+export function batchGenerateReminders(data) {
+  return request.post('/templates/reminders/batch', data)
+}

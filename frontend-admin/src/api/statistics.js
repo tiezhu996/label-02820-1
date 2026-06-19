@@ -23,3 +23,11 @@ export function exportPaymentDetail(params) {
 export function exportArrearsDetail(params) {
   return request.get('/statistics/arrears-detail/export', { params, responseType: 'blob' })
 }
+
+export function getBuildingCollection(params) {
+  return request.get('/statistics/building-collection', { params })
+}
+
+export function getBuildingUnits(buildingNo, params) {
+  return request.get(`/statistics/building-collection/${encodeURIComponent(buildingNo)}/units`, { params })
+}
