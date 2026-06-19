@@ -35,3 +35,7 @@ export function importOwners(file) {
 export function downloadTemplate() {
   return request.get('/owners/template', { responseType: 'blob' })
 }
+
+export function getOwnersWithArrears(params) {
+  return request.get('/owners/with-arrears', { params })
+}

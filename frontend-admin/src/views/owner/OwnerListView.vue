@@ -20,6 +20,12 @@
             <el-option label="空置" value="VACANT" />
           </el-select>
         </el-form-item>
+        <el-form-item label="账期月份">
+          <el-date-picker v-model="searchForm.periodMonth" type="month" value-format="YYYY-MM" placeholder="默认当前账期" style="width: 180px;" />
+        </el-form-item>
+        <el-form-item label="仅显示欠费">
+          <el-switch v-model="searchForm.onlyArrears" />
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="handleSearch">查询</el-button>
           <el-button @click="handleReset">重置</el-button>
@@ -32,9 +38,13 @@
         <el-button type="primary" @click="handleAdd" v-if="isAdmin">新增业主</el-button>
         <el-button type="success" @click="showImportDialog = true" v-if="isAdmin">Excel导入</el-button>
         <el-button type="info" @click="handleDownloadTemplate" v-if="isAdmin">下载模板</el-button>
+        <el-button type="danger" :disabled="selectedOwnerIds.length === 0" @click="openBatchReminder" v-if="isAdmin">
+          生成催缴单（{{ selectedOwnerIds.length }}）
+        </el-button>
       </div>
       
-      <el-table :data="tableData" v-loading="loading" stripe style="width: 100%;">
+      <el-table :data="tableData" v-loading="loading" stripe style="width: 100%;" @selection-change="onSelectionChange">
+        <el-table-column type="selection" width="46" :selectable="(row) => Number(row.cumulativeArrears) > 0" />
         <el-table-column prop="name" label="业主姓名" min-width="100" />
         <el-table-column prop="buildingNo" label="楼栋号" min-width="80" />
         <el-table-column prop="unitNo" label="单元号" min-width="80" />
@@ -43,6 +53,13 @@
         <el-table-column prop="area" label="面积(㎡)" min-width="100" />
         <el-table-column prop="moveInDate" label="入住时间" min-width="120">
           <template #default="{ row }">{{ formatDateValue(row.moveInDate) }}</template>
+        </el-table-column>
+        <el-table-column label="累计欠费" min-width="120">
+          <template #default="{ row }">
+            <span :class="{ 'arrears-danger': Number(row.cumulativeArrears) > 0 }">
+              ￥{{ Number(row.cumulativeArrears || 0).toFixed(2) }}
+            </span>
+          </template>
         </el-table-column>
         <el-table-column prop="status" label="状态" min-width="80">
           <template #default="{ row }">
@@ -128,15 +145,24 @@
         <el-button type="primary" :loading="importLoading" @click="handleImport">导入</el-button>
       </template>
     </el-dialog>
+
+    <BatchReminderDialog
+      v-model="showReminderDialog"
+      :owner-ids="selectedOwnerIds"
+      :period-start="reminderPeriodStart"
+      :period-end="reminderPeriodEnd"
+      @success="onReminderGenerated"
+    />
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getOwnerList, createOwner, updateOwner, deleteOwner, importOwners, downloadTemplate } from '@/api/owner'
+import { getOwnersWithArrears, createOwner, updateOwner, deleteOwner, importOwners, downloadTemplate } from '@/api/owner'
 import { useAuthStore } from '@/store/auth'
 import { formatDate as formatDateValue } from '@/utils'
+import BatchReminderDialog from '@/components/BatchReminderDialog.vue'
 
 const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.isAdmin)
@@ -151,19 +177,39 @@ const dialogTitle = ref('')
 const formRef = ref(null)
 const uploadRef = ref(null)
 const importFile = ref(null)
+const selectedOwnerIds = ref([])
+const showReminderDialog = ref(false)
+
+const currentPeriodMonth = () => {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+}
 
 const searchForm = reactive({
   name: '',
   buildingNo: '',
   unitNo: '',
   roomNo: '',
-  status: ''
+  status: '',
+  periodMonth: currentPeriodMonth(),
+  onlyArrears: false
 })
 
 const pagination = reactive({
   page: 1,
   size: 10,
   total: 0
+})
+
+const reminderPeriodStart = computed(() => {
+  if (!searchForm.periodMonth) return null
+  return `${searchForm.periodMonth}-01`
+})
+const reminderPeriodEnd = computed(() => {
+  if (!searchForm.periodMonth) return null
+  const [y, m] = searchForm.periodMonth.split('-').map(Number)
+  const last = new Date(y, m, 0)
+  return `${y}-${String(m).padStart(2, '0')}-${String(last.getDate()).padStart(2, '0')}`
 })
 
 const form = reactive({
@@ -189,11 +235,18 @@ const rules = {
 const loadData = async () => {
   loading.value = true
   try {
-    const res = await getOwnerList({
+    const params = {
       page: pagination.page,
       size: pagination.size,
-      ...searchForm
-    })
+      name: searchForm.name,
+      buildingNo: searchForm.buildingNo,
+      unitNo: searchForm.unitNo,
+      roomNo: searchForm.roomNo,
+      status: searchForm.status
+    }
+    if (searchForm.periodMonth) params.periodMonth = searchForm.periodMonth
+    if (searchForm.onlyArrears) params.onlyArrears = true
+    const res = await getOwnersWithArrears(params)
     tableData.value = res.data.records
     pagination.total = res.data.total
   } finally {
@@ -207,8 +260,24 @@ const handleSearch = () => {
 }
 
 const handleReset = () => {
-  Object.assign(searchForm, { name: '', buildingNo: '', unitNo: '', roomNo: '', status: '' })
+  Object.assign(searchForm, { name: '', buildingNo: '', unitNo: '', roomNo: '', status: '', periodMonth: currentPeriodMonth(), onlyArrears: false })
   handleSearch()
+}
+
+const onSelectionChange = (rows) => {
+  selectedOwnerIds.value = rows.map(r => r.id)
+}
+
+const openBatchReminder = () => {
+  if (selectedOwnerIds.value.length === 0) {
+    ElMessage.warning('请先选择需要催缴的欠费业主')
+    return
+  }
+  showReminderDialog.value = true
+}
+
+const onReminderGenerated = () => {
+  ElMessage.success('催缴单已生成')
 }
 
 const resetForm = () => {
@@ -319,5 +388,12 @@ onMounted(() => {
 <style lang="scss" scoped>
 .table-toolbar {
   margin-bottom: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.arrears-danger {
+  color: var(--danger-color);
+  font-weight: bold;
 }
 </style>
