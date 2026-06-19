@@ -6,7 +6,9 @@ import com.property.common.BusinessException;
 import com.property.common.ErrorCode;
 import com.property.config.AccountSetContext;
 import com.property.dto.OwnerDTO;
+import com.property.entity.Bill;
 import com.property.entity.Owner;
+import com.property.mapper.BillMapper;
 import com.property.mapper.OwnerMapper;
 import com.property.service.OwnerService;
 import lombok.RequiredArgsConstructor;
@@ -21,12 +23,14 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
 public class OwnerServiceImpl implements OwnerService {
     
     private final OwnerMapper ownerMapper;
+    private final BillMapper billMapper;
     
     @Override
     public Page<Owner> getPage(int page, int size, String name, String buildingNo, 
@@ -53,7 +57,42 @@ public class OwnerServiceImpl implements OwnerService {
         }
         wrapper.orderByAsc(Owner::getId);
         
-        return ownerMapper.selectPage(pageParam, wrapper);
+        Page<Owner> result = ownerMapper.selectPage(pageParam, wrapper);
+        
+        populateTotalArrears(result.getRecords());
+        
+        return result;
+    }
+    
+    private void populateTotalArrears(List<Owner> owners) {
+        if (owners == null || owners.isEmpty()) {
+            return;
+        }
+        
+        List<Long> ownerIds = owners.stream().map(Owner::getId).collect(Collectors.toList());
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+        
+        LocalDate today = LocalDate.now();
+        LocalDate periodStart = today.withDayOfMonth(1);
+        LocalDate periodEnd = today.withDayOfMonth(today.lengthOfMonth());
+        
+        LambdaQueryWrapper<Bill> billWrapper = new LambdaQueryWrapper<>();
+        billWrapper.eq(Bill::getAccountSetId, accountSetId)
+                   .in(Bill::getOwnerId, ownerIds)
+                   .eq(Bill::getPeriodStart, periodStart)
+                   .eq(Bill::getPeriodEnd, periodEnd)
+                   .in(Bill::getStatus, "UNPAID", "OVERDUE");
+        List<Bill> bills = billMapper.selectList(billWrapper);
+        
+        Map<Long, BigDecimal> arrearsMap = new HashMap<>();
+        for (Bill bill : bills) {
+            BigDecimal arrears = bill.getAmount().subtract(bill.getPaidAmount());
+            arrearsMap.merge(bill.getOwnerId(), arrears, BigDecimal::add);
+        }
+        
+        for (Owner owner : owners) {
+            owner.setTotalArrears(arrearsMap.getOrDefault(owner.getId(), BigDecimal.ZERO));
+        }
     }
     
     @Override
@@ -204,6 +243,8 @@ public class OwnerServiceImpl implements OwnerService {
     public List<Owner> getAll() {
         LambdaQueryWrapper<Owner> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(Owner::getAccountSetId, AccountSetContext.getCurrentAccountSetId());
-        return ownerMapper.selectList(wrapper);
+        List<Owner> owners = ownerMapper.selectList(wrapper);
+        populateTotalArrears(owners);
+        return owners;
     }
 }

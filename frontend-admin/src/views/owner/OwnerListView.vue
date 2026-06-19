@@ -32,15 +32,45 @@
         <el-button type="primary" @click="handleAdd" v-if="isAdmin">新增业主</el-button>
         <el-button type="success" @click="showImportDialog = true" v-if="isAdmin">Excel导入</el-button>
         <el-button type="info" @click="handleDownloadTemplate" v-if="isAdmin">下载模板</el-button>
+        <el-button 
+          type="danger" 
+          :disabled="selectedArrearsOwners.length === 0" 
+          @click="showReminderDialog = true"
+          v-if="isAdmin"
+        >
+          批量生成催缴单 ({{ selectedArrearsOwners.length }})
+        </el-button>
+        <el-button 
+          type="warning" 
+          plain
+          @click="selectAllArrears"
+          v-if="isAdmin"
+        >
+          选中本页欠费户
+        </el-button>
       </div>
       
-      <el-table :data="tableData" v-loading="loading" stripe style="width: 100%;">
+      <el-table 
+        :data="tableData" 
+        v-loading="loading" 
+        stripe 
+        style="width: 100%;"
+        @selection-change="handleSelectionChange"
+      >
+        <el-table-column type="selection" width="55" v-if="isAdmin" selectable="isSelectable" />
         <el-table-column prop="name" label="业主姓名" min-width="100" />
         <el-table-column prop="buildingNo" label="楼栋号" min-width="80" />
         <el-table-column prop="unitNo" label="单元号" min-width="80" />
         <el-table-column prop="roomNo" label="房间号" min-width="80" />
         <el-table-column prop="phone" label="电话" min-width="120" />
         <el-table-column prop="area" label="面积(㎡)" min-width="100" />
+        <el-table-column label="当前账期累计欠费" min-width="150" align="right">
+          <template #default="{ row }">
+            <span :class="{ 'text-danger': row.totalArrears > 0 }">
+              ￥{{ row.totalArrears || 0 }}
+            </span>
+          </template>
+        </el-table-column>
         <el-table-column prop="moveInDate" label="入住时间" min-width="120">
           <template #default="{ row }">{{ formatDateValue(row.moveInDate) }}</template>
         </el-table-column>
@@ -128,6 +158,8 @@
         <el-button type="primary" :loading="importLoading" @click="handleImport">导入</el-button>
       </template>
     </el-dialog>
+    
+    <ReminderDialog v-model="showReminderDialog" :owner-ids="selectedArrearsOwners" @update:model-value="handleReminderClose" />
   </div>
 </template>
 
@@ -137,6 +169,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { getOwnerList, createOwner, updateOwner, deleteOwner, importOwners, downloadTemplate } from '@/api/owner'
 import { useAuthStore } from '@/store/auth'
 import { formatDate as formatDateValue } from '@/utils'
+import ReminderDialog from '@/components/ReminderDialog.vue'
 
 const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.isAdmin)
@@ -151,6 +184,9 @@ const dialogTitle = ref('')
 const formRef = ref(null)
 const uploadRef = ref(null)
 const importFile = ref(null)
+const selectedRows = ref([])
+const selectedArrearsOwners = ref([])
+const showReminderDialog = ref(false)
 
 const searchForm = reactive({
   name: '',
@@ -186,8 +222,31 @@ const rules = {
   area: [{ required: true, message: '请输入房屋面积', trigger: 'blur' }]
 }
 
+const isSelectable = (row) => {
+  return row.totalArrears > 0
+}
+
+const handleSelectionChange = (rows) => {
+  selectedRows.value = rows
+  selectedArrearsOwners.value = rows.filter(r => r.totalArrears > 0).map(r => r.id)
+}
+
+const selectAllArrears = () => {
+  const arrearsOwners = tableData.value.filter(r => r.totalArrears > 0).map(r => r.id)
+  selectedArrearsOwners.value = arrearsOwners
+  ElMessage.info(`已选中 ${arrearsOwners.length} 户欠费业主`)
+}
+
+const handleReminderClose = (val) => {
+  showReminderDialog.value = val
+  if (!val) {
+    selectedArrearsOwners.value = []
+  }
+}
+
 const loadData = async () => {
   loading.value = true
+  selectedArrearsOwners.value = []
   try {
     const res = await getOwnerList({
       page: pagination.page,
@@ -319,5 +378,12 @@ onMounted(() => {
 <style lang="scss" scoped>
 .table-toolbar {
   margin-bottom: 16px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.text-danger {
+  color: var(--el-color-danger);
+  font-weight: 600;
 }
 </style>

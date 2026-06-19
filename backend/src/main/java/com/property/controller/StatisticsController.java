@@ -10,6 +10,7 @@ import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.*;
 
@@ -20,6 +21,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/statistics")
@@ -30,6 +32,11 @@ public class StatisticsController {
     private final PaymentMapper paymentMapper;
     private final OwnerMapper ownerMapper;
     private final ParkingMapper parkingMapper;
+    private final BuildingMapper buildingMapper;
+    private final SysConfigMapper sysConfigMapper;
+    
+    @Value("${property.arrears-threshold:20}")
+    private BigDecimal defaultArrearsThreshold;
     
     @GetMapping("/dashboard")
     public Result<DashboardData> getDashboard() {
@@ -340,5 +347,248 @@ public class StatisticsController {
         private Integer paidCount;
         private BigDecimal totalArrearsAmount;
         private Integer arrearsCount;
+    }
+    
+    @GetMapping("/building-summary")
+    public Result<List<BuildingSummary>> getBuildingSummary(
+            @RequestParam String feeType,
+            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate endDate) {
+        
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+        BigDecimal threshold = getArrearsThreshold();
+        
+        List<Building> buildings = buildingMapper.selectList(
+            new LambdaQueryWrapper<Building>()
+                .eq(Building::getAccountSetId, accountSetId)
+                .orderByAsc(Building::getBuildingNo)
+        );
+        
+        LambdaQueryWrapper<Bill> billWrapper = new LambdaQueryWrapper<>();
+        billWrapper.eq(Bill::getAccountSetId, accountSetId)
+                   .eq(Bill::getFeeType, feeType);
+        if (startDate != null) {
+            billWrapper.ge(Bill::getPeriodStart, startDate);
+        }
+        if (endDate != null) {
+            billWrapper.le(Bill::getPeriodEnd, endDate);
+        }
+        List<Bill> allBills = billMapper.selectList(billWrapper);
+        
+        Map<Long, Owner> ownerMap = ownerMapper.selectList(
+            new LambdaQueryWrapper<Owner>().eq(Owner::getAccountSetId, accountSetId)
+        ).stream().collect(Collectors.toMap(Owner::getId, o -> o));
+        
+        Map<String, List<Bill>> billsByBuilding = new HashMap<>();
+        for (Bill bill : allBills) {
+            Owner owner = ownerMap.get(bill.getOwnerId());
+            if (owner != null) {
+                billsByBuilding.computeIfAbsent(owner.getBuildingNo(), k -> new ArrayList<>()).add(bill);
+            }
+        }
+        
+        List<BuildingSummary> result = new ArrayList<>();
+        for (Building building : buildings) {
+            BuildingSummary summary = new BuildingSummary();
+            summary.setBuildingNo(building.getBuildingNo());
+            summary.setUnitCount(building.getUnitCount());
+            
+            List<Bill> buildingBills = billsByBuilding.getOrDefault(building.getBuildingNo(), Collections.emptyList());
+            
+            BigDecimal totalReceivable = BigDecimal.ZERO;
+            BigDecimal totalPaid = BigDecimal.ZERO;
+            for (Bill bill : buildingBills) {
+                totalReceivable = totalReceivable.add(bill.getAmount());
+                totalPaid = totalPaid.add(bill.getPaidAmount());
+            }
+            
+            BigDecimal totalArrears = totalReceivable.subtract(totalPaid);
+            summary.setTotalReceivable(totalReceivable);
+            summary.setTotalPaid(totalPaid);
+            summary.setTotalArrears(totalArrears);
+            
+            if (totalReceivable.compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal collectionRate = totalPaid.multiply(BigDecimal.valueOf(100))
+                    .divide(totalReceivable, 2, RoundingMode.HALF_UP);
+                BigDecimal arrearsRate = totalArrears.multiply(BigDecimal.valueOf(100))
+                    .divide(totalReceivable, 2, RoundingMode.HALF_UP);
+                summary.setCollectionRate(collectionRate);
+                summary.setArrearsRate(arrearsRate);
+                summary.setHighlight(arrearsRate.compareTo(threshold) >= 0);
+            } else {
+                summary.setCollectionRate(BigDecimal.ZERO);
+                summary.setArrearsRate(BigDecimal.ZERO);
+                summary.setHighlight(false);
+            }
+            
+            result.add(summary);
+        }
+        
+        return Result.success(result);
+    }
+    
+    @GetMapping("/building-detail/{buildingNo}")
+    public Result<List<UnitSummary>> getBuildingDetail(
+            @PathVariable String buildingNo,
+            @RequestParam String feeType,
+            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate endDate) {
+        
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+        BigDecimal threshold = getArrearsThreshold();
+        
+        LambdaQueryWrapper<Owner> ownerWrapper = new LambdaQueryWrapper<>();
+        ownerWrapper.eq(Owner::getAccountSetId, accountSetId)
+                    .eq(Owner::getBuildingNo, buildingNo)
+                    .orderByAsc(Owner::getUnitNo, Owner::getRoomNo);
+        List<Owner> owners = ownerMapper.selectList(ownerWrapper);
+        
+        LambdaQueryWrapper<Bill> billWrapper = new LambdaQueryWrapper<>();
+        billWrapper.eq(Bill::getAccountSetId, accountSetId)
+                   .eq(Bill::getFeeType, feeType);
+        if (startDate != null) {
+            billWrapper.ge(Bill::getPeriodStart, startDate);
+        }
+        if (endDate != null) {
+            billWrapper.le(Bill::getPeriodEnd, endDate);
+        }
+        List<Bill> allBills = billMapper.selectList(billWrapper);
+        
+        Map<Long, List<Bill>> billsByOwner = allBills.stream()
+            .collect(Collectors.groupingBy(Bill::getOwnerId));
+        
+        Map<String, List<Owner>> ownersByUnit = owners.stream()
+            .collect(Collectors.groupingBy(Owner::getUnitNo, TreeMap::new, Collectors.toList()));
+        
+        List<UnitSummary> result = new ArrayList<>();
+        for (Map.Entry<String, List<Owner>> entry : ownersByUnit.entrySet()) {
+            String unitNo = entry.getKey();
+            List<Owner> unitOwners = entry.getValue();
+            
+            UnitSummary unitSummary = new UnitSummary();
+            unitSummary.setUnitNo(unitNo);
+            
+            BigDecimal unitReceivable = BigDecimal.ZERO;
+            BigDecimal unitPaid = BigDecimal.ZERO;
+            List<RoomDetail> rooms = new ArrayList<>();
+            
+            for (Owner owner : unitOwners) {
+                RoomDetail room = new RoomDetail();
+                room.setOwnerId(owner.getId());
+                room.setOwnerName(owner.getName());
+                room.setRoomNo(owner.getRoomNo());
+                room.setPhone(owner.getPhone());
+                
+                List<Bill> ownerBills = billsByOwner.getOrDefault(owner.getId(), Collections.emptyList());
+                BigDecimal roomReceivable = BigDecimal.ZERO;
+                BigDecimal roomPaid = BigDecimal.ZERO;
+                
+                for (Bill bill : ownerBills) {
+                    roomReceivable = roomReceivable.add(bill.getAmount());
+                    roomPaid = roomPaid.add(bill.getPaidAmount());
+                }
+                
+                BigDecimal roomArrears = roomReceivable.subtract(roomPaid);
+                room.setTotalReceivable(roomReceivable);
+                room.setTotalPaid(roomPaid);
+                room.setTotalArrears(roomArrears);
+                
+                if (roomReceivable.compareTo(BigDecimal.ZERO) > 0) {
+                    BigDecimal collectionRate = roomPaid.multiply(BigDecimal.valueOf(100))
+                        .divide(roomReceivable, 2, RoundingMode.HALF_UP);
+                    BigDecimal arrearsRate = roomArrears.multiply(BigDecimal.valueOf(100))
+                        .divide(roomReceivable, 2, RoundingMode.HALF_UP);
+                    room.setCollectionRate(collectionRate);
+                    room.setArrearsRate(arrearsRate);
+                } else {
+                    room.setCollectionRate(BigDecimal.ZERO);
+                    room.setArrearsRate(BigDecimal.ZERO);
+                }
+                
+                rooms.add(room);
+                unitReceivable = unitReceivable.add(roomReceivable);
+                unitPaid = unitPaid.add(roomPaid);
+            }
+            
+            BigDecimal unitArrears = unitReceivable.subtract(unitPaid);
+            unitSummary.setTotalReceivable(unitReceivable);
+            unitSummary.setTotalPaid(unitPaid);
+            unitSummary.setTotalArrears(unitArrears);
+            unitSummary.setRooms(rooms);
+            
+            if (unitReceivable.compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal collectionRate = unitPaid.multiply(BigDecimal.valueOf(100))
+                    .divide(unitReceivable, 2, RoundingMode.HALF_UP);
+                BigDecimal arrearsRate = unitArrears.multiply(BigDecimal.valueOf(100))
+                    .divide(unitReceivable, 2, RoundingMode.HALF_UP);
+                unitSummary.setCollectionRate(collectionRate);
+                unitSummary.setArrearsRate(arrearsRate);
+                unitSummary.setHighlight(arrearsRate.compareTo(threshold) >= 0);
+            } else {
+                unitSummary.setCollectionRate(BigDecimal.ZERO);
+                unitSummary.setArrearsRate(BigDecimal.ZERO);
+                unitSummary.setHighlight(false);
+            }
+            
+            result.add(unitSummary);
+        }
+        
+        return Result.success(result);
+    }
+    
+    @GetMapping("/arrears-threshold")
+    public Result<BigDecimal> getArrearsThresholdConfig() {
+        return Result.success(getArrearsThreshold());
+    }
+    
+    private BigDecimal getArrearsThreshold() {
+        LambdaQueryWrapper<SysConfig> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(SysConfig::getConfigKey, "arrears_threshold");
+        SysConfig config = sysConfigMapper.selectOne(wrapper);
+        if (config != null && config.getConfigValue() != null) {
+            try {
+                return new BigDecimal(config.getConfigValue());
+            } catch (NumberFormatException e) {
+                return defaultArrearsThreshold;
+            }
+        }
+        return defaultArrearsThreshold;
+    }
+    
+    @Data
+    public static class BuildingSummary {
+        private String buildingNo;
+        private Integer unitCount;
+        private BigDecimal totalReceivable;
+        private BigDecimal totalPaid;
+        private BigDecimal totalArrears;
+        private BigDecimal collectionRate;
+        private BigDecimal arrearsRate;
+        private Boolean highlight;
+    }
+    
+    @Data
+    public static class UnitSummary {
+        private String unitNo;
+        private BigDecimal totalReceivable;
+        private BigDecimal totalPaid;
+        private BigDecimal totalArrears;
+        private BigDecimal collectionRate;
+        private BigDecimal arrearsRate;
+        private Boolean highlight;
+        private List<RoomDetail> rooms;
+    }
+    
+    @Data
+    public static class RoomDetail {
+        private Long ownerId;
+        private String ownerName;
+        private String roomNo;
+        private String phone;
+        private BigDecimal totalReceivable;
+        private BigDecimal totalPaid;
+        private BigDecimal totalArrears;
+        private BigDecimal collectionRate;
+        private BigDecimal arrearsRate;
     }
 }

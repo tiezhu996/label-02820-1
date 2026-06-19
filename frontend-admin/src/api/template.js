@@ -20,3 +20,11 @@ export function previewTemplate(id, ownerId) {
     responseType: 'blob' 
   })
 }
+
+export function batchPreviewReminders(data) {
+  return request.post('/templates/batch-preview', data)
+}
+
+export function batchGenerateReminders(data) {
+  return request.post('/templates/batch-generate', data, { responseType: 'blob' })
+}
