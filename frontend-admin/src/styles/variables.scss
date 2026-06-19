@@ -1,0 +1,39 @@
+// 主色调 - 蓝色系（禁止使用紫色）
+$primary-color: #409eff;
+$primary-light: #79bbff;
+$primary-dark: #337ecc;
+
+// 功能色
+$success-color: #67c23a;
+$warning-color: #e6a23c;
+$danger-color: #f56c6c;
+$info-color: #909399;
+
+// 浅色主题
+$light-bg-color: #f5f7fa;
+$light-bg-secondary: #ffffff;
+$light-text-primary: #303133;
+$light-text-regular: #606266;
+$light-text-secondary: #909399;
+$light-border-color: #dcdfe6;
+$light-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+
+// 深色主题
+$dark-bg-color: #141414;
+$dark-bg-secondary: #1d1d1d;
+$dark-text-primary: #e5eaf3;
+$dark-text-regular: #cfd3dc;
+$dark-text-secondary: #a3a6ad;
+$dark-border-color: #4c4d4f;
+$dark-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.5);
+
+// 卡片样式
+$card-radius: 8px;
+$card-padding: 20px;
+
+// 间距
+$spacing-xs: 4px;
+$spacing-sm: 8px;
+$spacing-md: 16px;
+$spacing-lg: 24px;
+$spacing-xl: 32px;

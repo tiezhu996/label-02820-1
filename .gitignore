@@ -1,0 +1,38 @@
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Kiro
+.kiro/
+
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+*.log
+.mvn/
+!.mvn/wrapper/maven-wrapper.jar
+
+# Node.js
+node_modules/
+dist/
+.npm
+*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Docker volumes
+mysql_data/
+uploads/
+backups/
