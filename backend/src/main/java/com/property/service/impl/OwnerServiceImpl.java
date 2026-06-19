@@ -7,7 +7,9 @@ import com.property.common.ErrorCode;
 import com.property.config.AccountSetContext;
 import com.property.dto.OwnerDTO;
 import com.property.entity.Owner;
+import com.property.entity.Receivable;
 import com.property.mapper.OwnerMapper;
+import com.property.mapper.ReceivableMapper;
 import com.property.service.OwnerService;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.ss.usermodel.*;
@@ -21,12 +23,14 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
 public class OwnerServiceImpl implements OwnerService {
     
     private final OwnerMapper ownerMapper;
+    private final ReceivableMapper receivableMapper;
     
     @Override
     public Page<Owner> getPage(int page, int size, String name, String buildingNo, 
@@ -52,8 +56,48 @@ public class OwnerServiceImpl implements OwnerService {
             wrapper.eq(Owner::getStatus, status);
         }
         wrapper.orderByAsc(Owner::getId);
-        
-        return ownerMapper.selectPage(pageParam, wrapper);
+
+        Page<Owner> result = ownerMapper.selectPage(pageParam, wrapper);
+
+        List<Owner> owners = result.getRecords();
+        if (!owners.isEmpty()) {
+            Set<Long> ownerIds = owners.stream().map(Owner::getId).collect(Collectors.toSet());
+            Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+
+            String currentPeriod = resolveCurrentPeriodMonth(accountSetId);
+
+            LambdaQueryWrapper<Receivable> recWrapper = new LambdaQueryWrapper<>();
+            recWrapper.eq(Receivable::getAccountSetId, accountSetId)
+                      .eq(Receivable::getPeriodMonth, currentPeriod)
+                      .in(Receivable::getOwnerId, ownerIds);
+            List<Receivable> receivables = receivableMapper.selectList(recWrapper);
+
+            Map<Long, BigDecimal> arrearsMap = new HashMap<>();
+            for (Receivable r : receivables) {
+                BigDecimal arrears = r.getAmount().subtract(r.getPaidAmount());
+                if (arrears.compareTo(BigDecimal.ZERO) > 0) {
+                    arrearsMap.merge(r.getOwnerId(), arrears, BigDecimal::add);
+                }
+            }
+
+            for (Owner owner : owners) {
+                owner.setCumulativeArrears(arrearsMap.getOrDefault(owner.getId(), BigDecimal.ZERO));
+            }
+        }
+
+        return result;
+    }
+
+    private String resolveCurrentPeriodMonth(Long accountSetId) {
+        LambdaQueryWrapper<Receivable> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(Receivable::getAccountSetId, accountSetId)
+               .orderByDesc(Receivable::getPeriodMonth)
+               .last("LIMIT 1");
+        Receivable latest = receivableMapper.selectOne(wrapper);
+        if (latest != null) {
+            return latest.getPeriodMonth();
+        }
+        return LocalDate.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM"));
     }
     
     @Override
