@@ -23,3 +23,15 @@ export function exportPaymentDetail(params) {
 export function exportArrearsDetail(params) {
   return request.get('/statistics/arrears-detail/export', { params, responseType: 'blob' })
 }
+
+export function getBuildingSummary(params) {
+  return request.get('/statistics/building-summary', { params })
+}
+
+export function getBuildingDetail(params) {
+  return request.get('/statistics/building-detail', { params })
+}
+
+export function getOwnersWithArrears(params) {
+  return request.get('/statistics/owners-arrears', { params })
+}

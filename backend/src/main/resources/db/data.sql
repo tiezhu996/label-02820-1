@@ -14,7 +14,8 @@ ON DUPLICATE KEY UPDATE name = name;
 -- 初始化系统配置
 INSERT INTO sys_config (config_key, config_value, description) VALUES
 ('company_name', '物业管理系统', '物业公司名称'),
-('company_logo', NULL, '物业公司Logo路径')
+('company_logo', NULL, '物业公司Logo路径'),
+('arrears_threshold', '20', '楼栋欠费率高亮阈值(%)')
 ON DUPLICATE KEY UPDATE config_key = config_key;
 
 -- 初始化默认缴费方式 (账套ID=1)

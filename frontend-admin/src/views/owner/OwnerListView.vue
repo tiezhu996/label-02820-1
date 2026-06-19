@@ -15,9 +15,14 @@
           <el-input v-model="searchForm.roomNo" placeholder="请输入" />
         </el-form-item>
         <el-form-item label="状态">
-          <el-select v-model="searchForm.status" placeholder="请选择" style="width: 120px;">
+          <el-select v-model="searchForm.status" placeholder="请选择" clearable style="width: 120px;">
             <el-option label="已入住" value="OCCUPIED" />
             <el-option label="空置" value="VACANT" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="欠费筛选">
+          <el-select v-model="searchForm.onlyArrears" placeholder="全部" clearable style="width: 120px;">
+            <el-option label="仅看欠费" value="true" />
           </el-select>
         </el-form-item>
         <el-form-item>
@@ -32,9 +37,24 @@
         <el-button type="primary" @click="handleAdd" v-if="isAdmin">新增业主</el-button>
         <el-button type="success" @click="showImportDialog = true" v-if="isAdmin">Excel导入</el-button>
         <el-button type="info" @click="handleDownloadTemplate" v-if="isAdmin">下载模板</el-button>
+        <el-button
+          type="warning"
+          @click="handleBatchReminder"
+          :disabled="selectedOwners.length === 0"
+        >
+          批量催缴 ({{ selectedArrearsOwners.length }}户)
+        </el-button>
       </div>
       
-      <el-table :data="tableData" v-loading="loading" stripe style="width: 100%;">
+      <el-table
+        ref="tableRef"
+        :data="filteredTableData"
+        v-loading="loading"
+        stripe
+        style="width: 100%;"
+        @selection-change="handleSelectionChange"
+      >
+        <el-table-column type="selection" width="50" selectable="isArrearsOwner" />
         <el-table-column prop="name" label="业主姓名" min-width="100" />
         <el-table-column prop="buildingNo" label="楼栋号" min-width="80" />
         <el-table-column prop="unitNo" label="单元号" min-width="80" />
@@ -44,6 +64,13 @@
         <el-table-column prop="moveInDate" label="入住时间" min-width="120">
           <template #default="{ row }">{{ formatDateValue(row.moveInDate) }}</template>
         </el-table-column>
+        <el-table-column label="累计欠费" min-width="120">
+          <template #default="{ row }">
+            <span :class="{ 'amount-danger': Number(row.cumulativeArrears) > 0 }">
+              ￥{{ Number(row.cumulativeArrears || 0).toFixed(2) }}
+            </span>
+          </template>
+        </el-table-column>
         <el-table-column prop="status" label="状态" min-width="80">
           <template #default="{ row }">
             <el-tag :type="row.status === 'OCCUPIED' ? 'success' : 'info'">
@@ -51,10 +78,18 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right" v-if="isAdmin">
+        <el-table-column label="操作" width="200" fixed="right" v-if="isAdmin">
           <template #default="{ row }">
             <el-button type="primary" link @click="handleEdit(row)">编辑</el-button>
             <el-button type="danger" link @click="handleDelete(row)">删除</el-button>
+            <el-button
+              v-if="Number(row.cumulativeArrears) > 0"
+              type="warning"
+              link
+              @click="handleSingleReminder(row)"
+            >
+              催缴
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -128,6 +163,12 @@
         <el-button type="primary" :loading="importLoading" @click="handleImport">导入</el-button>
       </template>
     </el-dialog>
+
+    <ReminderGenerateDialog
+      v-model="showReminderDialog"
+      :owners="selectedReminderOwners"
+      @success="handleReminderSuccess"
+    />
   </div>
 </template>
 
@@ -137,6 +178,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { getOwnerList, createOwner, updateOwner, deleteOwner, importOwners, downloadTemplate } from '@/api/owner'
 import { useAuthStore } from '@/store/auth'
 import { formatDate as formatDateValue } from '@/utils'
+import ReminderGenerateDialog from '@/components/ReminderGenerateDialog.vue'
 
 const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.isAdmin)
@@ -147,17 +189,21 @@ const importLoading = ref(false)
 const tableData = ref([])
 const showDialog = ref(false)
 const showImportDialog = ref(false)
+const showReminderDialog = ref(false)
 const dialogTitle = ref('')
 const formRef = ref(null)
 const uploadRef = ref(null)
+const tableRef = ref(null)
 const importFile = ref(null)
+const selectedOwners = ref([])
 
 const searchForm = reactive({
   name: '',
   buildingNo: '',
   unitNo: '',
   roomNo: '',
-  status: ''
+  status: '',
+  onlyArrears: ''
 })
 
 const pagination = reactive({
@@ -186,16 +232,47 @@ const rules = {
   area: [{ required: true, message: '请输入房屋面积', trigger: 'blur' }]
 }
 
+const filteredTableData = computed(() => {
+  if (searchForm.onlyArrears === 'true') {
+    return tableData.value.filter(row => Number(row.cumulativeArrears) > 0)
+  }
+  return tableData.value
+})
+
+const selectedArrearsOwners = computed(() => {
+  return selectedOwners.value.filter(o => Number(o.cumulativeArrears) > 0).map(o => ({
+    ownerId: o.id,
+    ownerName: o.name,
+    buildingNo: o.buildingNo,
+    unitNo: o.unitNo,
+    roomNo: o.roomNo,
+    cumulativeArrears: o.cumulativeArrears
+  }))
+})
+
+const selectedReminderOwners = ref([])
+
+const isArrearsOwner = (row) => {
+  return Number(row.cumulativeArrears) > 0
+}
+
+const handleSelectionChange = (selection) => {
+  selectedOwners.value = selection
+}
+
 const loadData = async () => {
   loading.value = true
   try {
-    const res = await getOwnerList({
+    const params = {
       page: pagination.page,
       size: pagination.size,
       ...searchForm
-    })
+    }
+    delete params.onlyArrears
+    const res = await getOwnerList(params)
     tableData.value = res.data.records
     pagination.total = res.data.total
+    selectedOwners.value = []
   } finally {
     loading.value = false
   }
@@ -207,7 +284,7 @@ const handleSearch = () => {
 }
 
 const handleReset = () => {
-  Object.assign(searchForm, { name: '', buildingNo: '', unitNo: '', roomNo: '', status: '' })
+  Object.assign(searchForm, { name: '', buildingNo: '', unitNo: '', roomNo: '', status: '', onlyArrears: '' })
   handleSearch()
 }
 
@@ -311,6 +388,31 @@ const handleDownloadTemplate = async () => {
   }
 }
 
+const handleBatchReminder = () => {
+  if (selectedArrearsOwners.value.length === 0) {
+    ElMessage.warning('请选择欠费业主')
+    return
+  }
+  selectedReminderOwners.value = [...selectedArrearsOwners.value]
+  showReminderDialog.value = true
+}
+
+const handleSingleReminder = (row) => {
+  selectedReminderOwners.value = [{
+    ownerId: row.id,
+    ownerName: row.name,
+    buildingNo: row.buildingNo,
+    unitNo: row.unitNo,
+    roomNo: row.roomNo,
+    cumulativeArrears: row.cumulativeArrears
+  }]
+  showReminderDialog.value = true
+}
+
+const handleReminderSuccess = () => {
+  selectedOwners.value = []
+}
+
 onMounted(() => {
   loadData()
 })
@@ -319,5 +421,9 @@ onMounted(() => {
 <style lang="scss" scoped>
 .table-toolbar {
   margin-bottom: 16px;
+}
+.amount-danger {
+  color: #f56c6c;
+  font-weight: bold;
 }
 </style>

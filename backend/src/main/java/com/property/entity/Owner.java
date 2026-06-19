@@ -35,4 +35,7 @@ public class Owner {
     
     @TableField(fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updateTime;
+    
+    @TableField(exist = false)
+    private BigDecimal cumulativeArrears;
 }
