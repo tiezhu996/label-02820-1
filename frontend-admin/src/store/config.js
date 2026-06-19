@@ -4,7 +4,8 @@ import { getConfig } from '@/api/config'
 export const useConfigStore = defineStore('config', {
   state: () => ({
     companyName: '物业管理系统',
-    logoUrl: null
+    logoUrl: null,
+    arrearsThreshold: 20
   }),
   
   actions: {
@@ -13,6 +14,7 @@ export const useConfigStore = defineStore('config', {
       if (res.data) {
         this.companyName = res.data.companyName || '物业管理系统'
         this.logoUrl = res.data.logoUrl
+        this.arrearsThreshold = parseInt(res.data.arrearsThreshold) || 20
       }
       return res
     },
@@ -23,6 +25,10 @@ export const useConfigStore = defineStore('config', {
     
     setLogoUrl(url) {
       this.logoUrl = url
+    },
+    
+    setArrearsThreshold(value) {
+      this.arrearsThreshold = value
     }
   },
   

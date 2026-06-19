@@ -40,6 +40,7 @@ public class ConfigController {
         config.put("companyName", getConfigValue("company_name", "物业管理系统"));
         config.put("logoUrl", getConfigValue("company_logo", ""));
         config.put("defaultDueDays", getConfigValue("default_due_days", "15"));
+        config.put("arrearsThreshold", getConfigValue("arrears_threshold", "20"));
         return Result.success(config);
     }
     
@@ -52,6 +53,9 @@ public class ConfigController {
         }
         if (dto.getDefaultDueDays() != null) {
             updateConfigValue("default_due_days", String.valueOf(dto.getDefaultDueDays()));
+        }
+        if (dto.getArrearsThreshold() != null) {
+            updateConfigValue("arrears_threshold", String.valueOf(dto.getArrearsThreshold()));
         }
         return Result.success();
     }
@@ -121,5 +125,6 @@ public class ConfigController {
     public static class ConfigDTO {
         private String companyName;
         private Integer defaultDueDays;
+        private Integer arrearsThreshold;
     }
 }

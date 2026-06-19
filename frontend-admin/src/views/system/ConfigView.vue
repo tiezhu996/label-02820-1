@@ -18,6 +18,11 @@
           <el-input-number v-model="form.defaultDueDays" :min="1" :max="90" />
           <div class="form-tip">账单周期结束后多少天为缴费截止日</div>
         </el-form-item>
+        <el-form-item label="欠费率高亮阈值">
+          <el-input-number v-model="form.arrearsThreshold" :min="0" :max="100" />
+          <span style="margin-left: 5px;">%</span>
+          <div class="form-tip">楼栋欠费率超过此阈值时在统计页面高亮显示</div>
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="loading" @click="handleSave">保存配置</el-button>
         </el-form-item>
@@ -52,13 +57,14 @@ import { useConfigStore } from '@/store/config'
 
 const configStore = useConfigStore()
 const loading = ref(false)
-const form = reactive({ companyName: '', logoUrl: '', defaultDueDays: 15 })
+const form = reactive({ companyName: '', logoUrl: '', defaultDueDays: 15, arrearsThreshold: 20 })
 
 const loadData = async () => {
   const res = await getConfig()
   form.companyName = res.data.companyName || ''
   form.logoUrl = res.data.logoUrl || ''
   form.defaultDueDays = parseInt(res.data.defaultDueDays) || 15
+  form.arrearsThreshold = parseInt(res.data.arrearsThreshold) || 20
 }
 
 const handleLogoUpload = async (file) => {
@@ -74,8 +80,13 @@ const handleLogoUpload = async (file) => {
 const handleSave = async () => {
   loading.value = true
   try {
-    await updateConfig({ companyName: form.companyName, defaultDueDays: form.defaultDueDays })
+    await updateConfig({
+      companyName: form.companyName,
+      defaultDueDays: form.defaultDueDays,
+      arrearsThreshold: form.arrearsThreshold
+    })
     configStore.setCompanyName(form.companyName)
+    configStore.setArrearsThreshold(form.arrearsThreshold)
     ElMessage.success('保存成功')
   } finally { loading.value = false }
 }

@@ -6,7 +6,9 @@ import com.property.common.BusinessException;
 import com.property.common.ErrorCode;
 import com.property.config.AccountSetContext;
 import com.property.dto.OwnerDTO;
+import com.property.entity.Bill;
 import com.property.entity.Owner;
+import com.property.mapper.BillMapper;
 import com.property.mapper.OwnerMapper;
 import com.property.service.OwnerService;
 import lombok.RequiredArgsConstructor;
@@ -19,14 +21,47 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
 public class OwnerServiceImpl implements OwnerService {
     
     private final OwnerMapper ownerMapper;
+    private final BillMapper billMapper;
+
+    private void fillCumulativeArrears(List<Owner> owners) {
+        if (owners.isEmpty()) return;
+        
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+        List<Long> ownerIds = owners.stream().map(Owner::getId).collect(Collectors.toList());
+        
+        YearMonth currentMonth = YearMonth.now();
+        LocalDate periodStart = currentMonth.atDay(1);
+        LocalDate periodEnd = currentMonth.atEndOfMonth();
+        
+        LambdaQueryWrapper<Bill> billWrapper = new LambdaQueryWrapper<>();
+        billWrapper.eq(Bill::getAccountSetId, accountSetId)
+                   .in(Bill::getOwnerId, ownerIds)
+                   .ge(Bill::getPeriodStart, periodStart)
+                   .le(Bill::getPeriodEnd, periodEnd)
+                   .in(Bill::getStatus, "UNPAID", "OVERDUE");
+        List<Bill> bills = billMapper.selectList(billWrapper);
+        
+        Map<Long, BigDecimal> arrearsMap = new HashMap<>();
+        for (Bill bill : bills) {
+            BigDecimal arrears = bill.getAmount().subtract(bill.getPaidAmount());
+            arrearsMap.merge(bill.getOwnerId(), arrears, BigDecimal::add);
+        }
+        
+        for (Owner owner : owners) {
+            owner.setCumulativeArrears(arrearsMap.getOrDefault(owner.getId(), BigDecimal.ZERO));
+        }
+    }
     
     @Override
     public Page<Owner> getPage(int page, int size, String name, String buildingNo, 
@@ -53,7 +88,9 @@ public class OwnerServiceImpl implements OwnerService {
         }
         wrapper.orderByAsc(Owner::getId);
         
-        return ownerMapper.selectPage(pageParam, wrapper);
+        Page<Owner> result = ownerMapper.selectPage(pageParam, wrapper);
+        fillCumulativeArrears(result.getRecords());
+        return result;
     }
     
     @Override
@@ -204,6 +241,8 @@ public class OwnerServiceImpl implements OwnerService {
     public List<Owner> getAll() {
         LambdaQueryWrapper<Owner> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(Owner::getAccountSetId, AccountSetContext.getCurrentAccountSetId());
-        return ownerMapper.selectList(wrapper);
+        List<Owner> owners = ownerMapper.selectList(wrapper);
+        fillCumulativeArrears(owners);
+        return owners;
     }
 }
