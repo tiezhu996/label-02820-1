@@ -16,6 +16,18 @@ export function getSummary(params) {
   return request.get('/statistics/summary', { params })
 }
 
+export function getBuildingSummary(params) {
+  return request.get('/statistics/building-summary', { params })
+}
+
+export function getBuildingDetail(buildingNo, params) {
+  return request.get(`/statistics/building-detail/${buildingNo}`, { params })
+}
+
+export function getArrearsThreshold() {
+  return request.get('/statistics/arrears-threshold')
+}
+
 export function exportPaymentDetail(params) {
   return request.get('/statistics/payment-detail/export', { params, responseType: 'blob' })
 }

@@ -6,6 +6,7 @@ import com.property.common.BusinessException;
 import com.property.common.ErrorCode;
 import com.property.common.Result;
 import com.property.config.AccountSetContext;
+import com.property.dto.BatchReminderRequest;
 import com.property.entity.Bill;
 import com.property.entity.Owner;
 import com.property.entity.Template;
@@ -13,6 +14,7 @@ import com.property.mapper.BillMapper;
 import com.property.mapper.OwnerMapper;
 import com.property.mapper.TemplateMapper;
 import jakarta.servlet.http.HttpServletResponse;
+import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -27,8 +29,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.time.temporal.TemporalAdjusters;
 
 @RestController
 @RequestMapping("/templates")
@@ -74,15 +78,21 @@ public class TemplateController {
     @PreAuthorize("hasRole('ADMIN')")
     @OperationLog(operation = "删除模板")
     public Result<Void> delete(@PathVariable Long id) {
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+        Template template = templateMapper.selectById(id);
+        if (template == null || !accountSetId.equals(template.getAccountSetId())) {
+            throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "模板不存在或无权访问");
+        }
         templateMapper.deleteById(id);
         return Result.success();
     }
     
     @GetMapping("/{id}/download")
     public void download(@PathVariable Long id, HttpServletResponse response) throws IOException {
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
         Template template = templateMapper.selectById(id);
-        if (template == null) {
-            throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "模板不存在");
+        if (template == null || !accountSetId.equals(template.getAccountSetId())) {
+            throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "模板不存在或无权访问");
         }
         
         String filename = template.getFilePath().substring(template.getFilePath().lastIndexOf("/") + 1);
@@ -99,19 +109,26 @@ public class TemplateController {
     
     @GetMapping("/{id}/preview")
     public Result<String> preview(@PathVariable Long id, @RequestParam Long ownerId) {
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+        
         Template template = templateMapper.selectById(id);
-        if (template == null) {
-            throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "模板不存在");
+        if (template == null || !accountSetId.equals(template.getAccountSetId())) {
+            throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "模板不存在或无权访问");
         }
         
         Owner owner = ownerMapper.selectById(ownerId);
-        if (owner == null) {
-            throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "业主不存在");
+        if (owner == null || !accountSetId.equals(owner.getAccountSetId())) {
+            throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "业主不存在或无权访问");
         }
         
-        // 获取业主欠费信息
+        LocalDate periodStart = LocalDate.now().with(TemporalAdjusters.firstDayOfMonth());
+        LocalDate periodEnd = LocalDate.now().with(TemporalAdjusters.lastDayOfMonth());
+        
         LambdaQueryWrapper<Bill> billWrapper = new LambdaQueryWrapper<>();
-        billWrapper.eq(Bill::getOwnerId, ownerId)
+        billWrapper.eq(Bill::getAccountSetId, accountSetId)
+                   .eq(Bill::getOwnerId, ownerId)
+                   .eq(Bill::getPeriodStart, periodStart)
+                   .eq(Bill::getPeriodEnd, periodEnd)
                    .in(Bill::getStatus, "UNPAID", "OVERDUE");
         List<Bill> bills = billMapper.selectList(billWrapper);
         
@@ -142,7 +159,7 @@ public class TemplateController {
                 @page { size: A4; margin: 20mm; }
                 @media print { body { margin: 0; padding: 0; } }
             </style>
-            <div style="width: 210mm; min-height: 297mm; padding: 20mm; box-sizing: border-box; font-family: SimSun, serif; margin: 0 auto;">
+            <div style="width: 210mm; min-height: 297mm; padding: 20mm; box-sizing: border-box; font-family: SimSun, serif; margin: 0 auto; page-break-after: always;">
                 <h2 style="text-align: center; margin-bottom: 30px;">%s</h2>
                 <p style="margin-bottom: 20px; font-size: 14px;">尊敬的 <strong>%s</strong> 业主：</p>
                 <p style="text-indent: 2em; line-height: 2; font-size: 14px;">
@@ -163,5 +180,139 @@ public class TemplateController {
                 </div>
             </div>
             """.formatted(title, owner.getName(), roomInfo, billDetails, totalArrears, today);
+    }
+    
+    @PostMapping("/batch-preview")
+    public Result<BatchPreviewResult> batchPreview(@RequestBody BatchReminderRequest request) {
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+        
+        Template template = templateMapper.selectById(request.getTemplateId());
+        if (template == null || !accountSetId.equals(template.getAccountSetId())) {
+            throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "模板不存在或无权访问");
+        }
+        
+        List<ReminderItem> items = new ArrayList<>();
+        for (Long ownerId : request.getOwnerIds()) {
+            Owner owner = ownerMapper.selectById(ownerId);
+            if (owner == null || !accountSetId.equals(owner.getAccountSetId())) continue;
+            
+            LocalDate periodStart = LocalDate.now().with(TemporalAdjusters.firstDayOfMonth());
+            LocalDate periodEnd = LocalDate.now().with(TemporalAdjusters.lastDayOfMonth());
+            
+            LambdaQueryWrapper<Bill> billWrapper = new LambdaQueryWrapper<>();
+            billWrapper.eq(Bill::getAccountSetId, accountSetId)
+                       .eq(Bill::getOwnerId, ownerId)
+                       .eq(Bill::getPeriodStart, periodStart)
+                       .eq(Bill::getPeriodEnd, periodEnd)
+                       .in(Bill::getStatus, "UNPAID", "OVERDUE");
+            List<Bill> bills = billMapper.selectList(billWrapper);
+            
+            BigDecimal totalArrears = BigDecimal.ZERO;
+            StringBuilder billDetails = new StringBuilder();
+            for (Bill bill : bills) {
+                BigDecimal arrears = bill.getAmount().subtract(bill.getPaidAmount());
+                totalArrears = totalArrears.add(arrears);
+                billDetails.append(String.format("%s: ￥%s<br/>", bill.getFeeName(), arrears));
+            }
+            
+            if (totalArrears.compareTo(BigDecimal.ZERO) <= 0) continue;
+            
+            ReminderItem item = new ReminderItem();
+            item.setOwnerId(ownerId);
+            item.setOwnerName(owner.getName());
+            item.setRoomInfo(owner.getBuildingNo() + "-" + owner.getUnitNo() + "-" + owner.getRoomNo());
+            item.setTotalArrears(totalArrears);
+            item.setHtml(generateNoticeHtml(template.getTemplateType(), owner, totalArrears, billDetails.toString()));
+            items.add(item);
+        }
+        
+        BatchPreviewResult result = new BatchPreviewResult();
+        result.setTemplateName(template.getTemplateName());
+        result.setTemplateType(template.getTemplateType());
+        result.setCount(items.size());
+        result.setItems(items);
+        
+        return Result.success(result);
+    }
+    
+    @PostMapping("/batch-generate")
+    @OperationLog(operation = "批量生成催缴单")
+    public void batchGenerate(@RequestBody BatchReminderRequest request, HttpServletResponse response) throws IOException {
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+        
+        Template template = templateMapper.selectById(request.getTemplateId());
+        if (template == null || !accountSetId.equals(template.getAccountSetId())) {
+            throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "模板不存在或无权访问");
+        }
+        
+        StringBuilder allHtml = new StringBuilder();
+        allHtml.append("""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>批量催缴单</title>
+                <style>
+                    body { margin: 0; padding: 0; }
+                </style>
+            </head>
+            <body>
+            """);
+        
+        LocalDate periodStart = LocalDate.now().with(TemporalAdjusters.firstDayOfMonth());
+        LocalDate periodEnd = LocalDate.now().with(TemporalAdjusters.lastDayOfMonth());
+        
+        for (Long ownerId : request.getOwnerIds()) {
+            Owner owner = ownerMapper.selectById(ownerId);
+            if (owner == null || !accountSetId.equals(owner.getAccountSetId())) continue;
+            
+            LambdaQueryWrapper<Bill> billWrapper = new LambdaQueryWrapper<>();
+            billWrapper.eq(Bill::getAccountSetId, accountSetId)
+                       .eq(Bill::getOwnerId, ownerId)
+                       .eq(Bill::getPeriodStart, periodStart)
+                       .eq(Bill::getPeriodEnd, periodEnd)
+                       .in(Bill::getStatus, "UNPAID", "OVERDUE");
+            List<Bill> bills = billMapper.selectList(billWrapper);
+            
+            BigDecimal totalArrears = BigDecimal.ZERO;
+            StringBuilder billDetails = new StringBuilder();
+            for (Bill bill : bills) {
+                BigDecimal arrears = bill.getAmount().subtract(bill.getPaidAmount());
+                totalArrears = totalArrears.add(arrears);
+                billDetails.append(String.format("%s: ￥%s<br/>", bill.getFeeName(), arrears));
+            }
+            
+            if (totalArrears.compareTo(BigDecimal.ZERO) <= 0) continue;
+            
+            allHtml.append(generateNoticeHtml(template.getTemplateType(), owner, totalArrears, billDetails.toString()));
+        }
+        
+        allHtml.append("""
+            </body>
+            </html>
+            """);
+        
+        String filename = "批量催缴单_" + LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd")) + ".html";
+        response.setContentType("text/html; charset=UTF-8");
+        response.setHeader("Content-Disposition", "attachment; filename=" + 
+            URLEncoder.encode(filename, StandardCharsets.UTF_8));
+        response.getWriter().write(allHtml.toString());
+    }
+    
+    @Data
+    public static class BatchPreviewResult {
+        private String templateName;
+        private String templateType;
+        private Integer count;
+        private List<ReminderItem> items;
+    }
+    
+    @Data
+    public static class ReminderItem {
+        private Long ownerId;
+        private String ownerName;
+        private String roomInfo;
+        private BigDecimal totalArrears;
+        private String html;
     }
 }
