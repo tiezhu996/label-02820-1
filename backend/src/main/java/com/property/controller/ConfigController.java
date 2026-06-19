@@ -15,6 +15,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -40,9 +41,10 @@ public class ConfigController {
         config.put("companyName", getConfigValue("company_name", "物业管理系统"));
         config.put("logoUrl", getConfigValue("company_logo", ""));
         config.put("defaultDueDays", getConfigValue("default_due_days", "15"));
+        config.put("arrearsRateThreshold", getConfigValue("arrears_rate_threshold", "20"));
         return Result.success(config);
     }
-    
+
     @PutMapping
     @PreAuthorize("hasRole('ADMIN')")
     @OperationLog(operation = "更新系统配置")
@@ -52,6 +54,9 @@ public class ConfigController {
         }
         if (dto.getDefaultDueDays() != null) {
             updateConfigValue("default_due_days", String.valueOf(dto.getDefaultDueDays()));
+        }
+        if (dto.getArrearsRateThreshold() != null) {
+            updateConfigValue("arrears_rate_threshold", String.valueOf(dto.getArrearsRateThreshold()));
         }
         return Result.success();
     }
@@ -121,5 +126,6 @@ public class ConfigController {
     public static class ConfigDTO {
         private String companyName;
         private Integer defaultDueDays;
+        private BigDecimal arrearsRateThreshold;
     }
 }

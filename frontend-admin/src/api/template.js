@@ -16,7 +16,10 @@ export function deleteTemplate(id) {
 
 export function previewTemplate(id, ownerId) {
   return request.get(`/templates/${id}/preview`, { 
-    params: { ownerId },
-    responseType: 'blob' 
+    params: { ownerId }
   })
+}
+
+export function batchGenerateReminders(data) {
+  return request.post('/templates/batch-generate', data)
 }

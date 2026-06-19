@@ -20,6 +20,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/statistics")
@@ -30,6 +31,9 @@ public class StatisticsController {
     private final PaymentMapper paymentMapper;
     private final OwnerMapper ownerMapper;
     private final ParkingMapper parkingMapper;
+    private final BuildingMapper buildingMapper;
+    private final ReceivableMapper receivableMapper;
+    private final SysConfigMapper configMapper;
     
     @GetMapping("/dashboard")
     public Result<DashboardData> getDashboard() {
@@ -340,5 +344,271 @@ public class StatisticsController {
         private Integer paidCount;
         private BigDecimal totalArrearsAmount;
         private Integer arrearsCount;
+    }
+
+    @GetMapping("/building-summary")
+    public Result<BuildingSummaryResponse> getBuildingSummary(
+            @RequestParam(required = false) String feeType) {
+
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+        BigDecimal arrearsThreshold = getArrearsThreshold();
+
+        String currentPeriod = resolveCurrentPeriodMonth(accountSetId);
+
+        LambdaQueryWrapper<Building> buildingWrapper = new LambdaQueryWrapper<>();
+        buildingWrapper.eq(Building::getAccountSetId, accountSetId);
+        buildingWrapper.orderByAsc(Building::getBuildingNo);
+        List<Building> allBuildings = buildingMapper.selectList(buildingWrapper);
+
+        LambdaQueryWrapper<Owner> ownerWrapper = new LambdaQueryWrapper<>();
+        ownerWrapper.eq(Owner::getAccountSetId, accountSetId);
+        List<Owner> allOwners = ownerMapper.selectList(ownerWrapper);
+        Map<Long, Owner> ownerMap = allOwners.stream()
+                .collect(Collectors.toMap(Owner::getId, o -> o));
+
+        LambdaQueryWrapper<Receivable> recWrapper = new LambdaQueryWrapper<>();
+        recWrapper.eq(Receivable::getAccountSetId, accountSetId)
+                  .eq(Receivable::getPeriodMonth, currentPeriod);
+        if (feeType != null && !feeType.isEmpty()) {
+            recWrapper.eq(Receivable::getFeeType, feeType);
+        }
+        List<Receivable> receivables = receivableMapper.selectList(recWrapper);
+
+        Map<Long, OwnerReceivableSummary> ownerSummaryMap = new HashMap<>();
+        for (Receivable r : receivables) {
+            OwnerReceivableSummary s = ownerSummaryMap.computeIfAbsent(
+                    r.getOwnerId(), k -> new OwnerReceivableSummary());
+            s.receivable = s.receivable.add(r.getAmount());
+            s.received = s.received.add(r.getPaidAmount());
+            s.feeItems.add(new FeeItem(r.getFeeType(), r.getAmount(), r.getPaidAmount()));
+        }
+
+        Map<String, List<Owner>> ownersByBuilding = allOwners.stream()
+                .collect(Collectors.groupingBy(Owner::getBuildingNo));
+
+        List<BuildingSummaryItem> buildingItems = new ArrayList<>();
+        for (Building b : allBuildings) {
+            String buildingNo = b.getBuildingNo();
+            List<Owner> buildingOwners = ownersByBuilding.getOrDefault(buildingNo, Collections.emptyList());
+
+            BigDecimal receivable = BigDecimal.ZERO;
+            BigDecimal received = BigDecimal.ZERO;
+            long arrearsOwnerCount = 0;
+
+            Map<String, List<Owner>> ownersByUnit = buildingOwners.stream()
+                    .collect(Collectors.groupingBy(Owner::getUnitNo));
+
+            List<UnitSummaryItem> unitItems = new ArrayList<>();
+            List<String> sortedUnitNos = new ArrayList<>(ownersByUnit.keySet());
+            sortedUnitNos.sort(Comparator.naturalOrder());
+
+            for (String unitNo : sortedUnitNos) {
+                List<Owner> unitOwners = ownersByUnit.get(unitNo);
+
+                BigDecimal unitReceivable = BigDecimal.ZERO;
+                BigDecimal unitReceived = BigDecimal.ZERO;
+                List<RoomDetailItem> roomItems = new ArrayList<>();
+
+                for (Owner owner : unitOwners) {
+                    OwnerReceivableSummary s = ownerSummaryMap.getOrDefault(owner.getId(), new OwnerReceivableSummary());
+                    BigDecimal ownerArrears = s.receivable.subtract(s.received);
+
+                    unitReceivable = unitReceivable.add(s.receivable);
+                    unitReceived = unitReceived.add(s.received);
+
+                    String feeDetail = s.feeItems.stream()
+                            .map(f -> resolveFeeName(f.feeType) + ": 应收￥" + f.amount + " / 已收￥" + f.paid)
+                            .collect(Collectors.joining("<br/>"));
+                    if (feeDetail.isEmpty()) feeDetail = "无费用";
+
+                    RoomDetailItem room = new RoomDetailItem();
+                    room.setOwnerId(owner.getId());
+                    room.setOwnerName(owner.getName());
+                    room.setRoomNo(owner.getRoomNo());
+                    room.setPhone(owner.getPhone());
+                    room.setFeeName(feeDetail);
+                    room.setReceivable(s.receivable);
+                    room.setReceived(s.received);
+                    room.setArrears(ownerArrears);
+                    room.setHasArrears(ownerArrears.compareTo(BigDecimal.ZERO) > 0);
+                    roomItems.add(room);
+                }
+
+                BigDecimal unitArrears = unitReceivable.subtract(unitReceived);
+                BigDecimal unitCollectionRate = unitReceivable.compareTo(BigDecimal.ZERO) > 0
+                        ? unitReceived.multiply(BigDecimal.valueOf(100)).divide(unitReceivable, 2, RoundingMode.HALF_UP)
+                        : BigDecimal.ZERO;
+
+                UnitSummaryItem unit = new UnitSummaryItem();
+                unit.setUnitNo(unitNo);
+                unit.setReceivable(unitReceivable);
+                unit.setReceived(unitReceived);
+                unit.setArrears(unitArrears);
+                unit.setCollectionRate(unitCollectionRate);
+                unit.setRoomCount((long) unitOwners.size());
+                unit.setRooms(roomItems);
+                unitItems.add(unit);
+
+                receivable = receivable.add(unitReceivable);
+                received = received.add(unitReceived);
+            }
+
+            for (Owner owner : buildingOwners) {
+                OwnerReceivableSummary s = ownerSummaryMap.get(owner.getId());
+                if (s != null && s.receivable.subtract(s.received).compareTo(BigDecimal.ZERO) > 0) {
+                    arrearsOwnerCount++;
+                }
+            }
+
+            BigDecimal arrears = receivable.subtract(received);
+            BigDecimal collectionRate = receivable.compareTo(BigDecimal.ZERO) > 0
+                    ? received.multiply(BigDecimal.valueOf(100)).divide(receivable, 2, RoundingMode.HALF_UP)
+                    : BigDecimal.ZERO;
+            BigDecimal arrearsRate = receivable.compareTo(BigDecimal.ZERO) > 0
+                    ? arrears.multiply(BigDecimal.valueOf(100)).divide(receivable, 2, RoundingMode.HALF_UP)
+                    : BigDecimal.ZERO;
+
+            BuildingSummaryItem building = new BuildingSummaryItem();
+            building.setBuildingNo(buildingNo);
+            building.setReceivable(receivable);
+            building.setReceived(received);
+            building.setArrears(arrears);
+            building.setCollectionRate(collectionRate);
+            building.setArrearsRate(arrearsRate);
+            building.setHighlighted(arrearsRate.compareTo(arrearsThreshold) > 0);
+            building.setRoomCount((long) buildingOwners.size());
+            building.setArrearsRoomCount(arrearsOwnerCount);
+            building.setUnits(unitItems);
+            buildingItems.add(building);
+        }
+
+        BuildingSummaryResponse response = new BuildingSummaryResponse();
+        response.setThreshold(arrearsThreshold);
+        response.setCurrentPeriod(currentPeriod);
+        response.setBuildings(buildingItems);
+
+        BigDecimal totalReceivable = BigDecimal.ZERO;
+        BigDecimal totalReceived = BigDecimal.ZERO;
+        long totalOwners = 0;
+        long totalArrearsOwners = 0;
+        for (BuildingSummaryItem b : buildingItems) {
+            totalReceivable = totalReceivable.add(b.getReceivable());
+            totalReceived = totalReceived.add(b.getReceived());
+            totalOwners += b.getRoomCount();
+            totalArrearsOwners += b.getArrearsRoomCount();
+        }
+        response.setTotalReceivable(totalReceivable);
+        response.setTotalReceived(totalReceived);
+        response.setTotalArrears(totalReceivable.subtract(totalReceived));
+        response.setTotalOwners(totalOwners);
+        response.setTotalArrearsOwners(totalArrearsOwners);
+        response.setTotalCollectionRate(totalReceivable.compareTo(BigDecimal.ZERO) > 0
+                ? totalReceived.multiply(BigDecimal.valueOf(100)).divide(totalReceivable, 2, RoundingMode.HALF_UP)
+                : BigDecimal.ZERO);
+
+        return Result.success(response);
+    }
+
+    private String resolveCurrentPeriodMonth(Long accountSetId) {
+        LambdaQueryWrapper<Receivable> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(Receivable::getAccountSetId, accountSetId)
+               .orderByDesc(Receivable::getPeriodMonth)
+               .last("LIMIT 1");
+        Receivable latest = receivableMapper.selectOne(wrapper);
+        if (latest != null) {
+            return latest.getPeriodMonth();
+        }
+        return LocalDate.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM"));
+    }
+
+    private static class OwnerReceivableSummary {
+        BigDecimal receivable = BigDecimal.ZERO;
+        BigDecimal received = BigDecimal.ZERO;
+        List<FeeItem> feeItems = new ArrayList<>();
+    }
+
+    @Data
+    private static class FeeItem {
+        String feeType;
+        BigDecimal amount;
+        BigDecimal paid;
+        FeeItem(String feeType, BigDecimal amount, BigDecimal paid) {
+            this.feeType = feeType;
+            this.amount = amount;
+            this.paid = paid;
+        }
+    }
+
+    private String resolveFeeName(String feeType) {
+        return switch (feeType) {
+            case "PROPERTY" -> "物业费";
+            case "PARKING" -> "车位费";
+            case "WATER" -> "水费";
+            case "ELECTRIC" -> "电费";
+            case "GAS" -> "燃气费";
+            case "HEATING" -> "暖气费";
+            default -> feeType;
+        };
+    }
+
+    private BigDecimal getArrearsThreshold() {
+        String val = configMapper.getValueByKey("arrears_rate_threshold");
+        if (val != null) {
+            try {
+                return new BigDecimal(val);
+            } catch (NumberFormatException ignored) {}
+        }
+        return new BigDecimal("20");
+    }
+
+    @Data
+    public static class BuildingSummaryResponse {
+        private String currentPeriod;
+        private BigDecimal threshold;
+        private BigDecimal totalReceivable;
+        private BigDecimal totalReceived;
+        private BigDecimal totalArrears;
+        private BigDecimal totalCollectionRate;
+        private Long totalOwners;
+        private Long totalArrearsOwners;
+        private List<BuildingSummaryItem> buildings;
+    }
+
+    @Data
+    public static class BuildingSummaryItem {
+        private String buildingNo;
+        private BigDecimal receivable;
+        private BigDecimal received;
+        private BigDecimal arrears;
+        private BigDecimal collectionRate;
+        private BigDecimal arrearsRate;
+        private Boolean highlighted;
+        private Long roomCount;
+        private Long arrearsRoomCount;
+        private List<UnitSummaryItem> units;
+    }
+
+    @Data
+    public static class UnitSummaryItem {
+        private String unitNo;
+        private BigDecimal receivable;
+        private BigDecimal received;
+        private BigDecimal arrears;
+        private BigDecimal collectionRate;
+        private Long roomCount;
+        private List<RoomDetailItem> rooms;
+    }
+
+    @Data
+    public static class RoomDetailItem {
+        private Long ownerId;
+        private String ownerName;
+        private String roomNo;
+        private String phone;
+        private String feeName;
+        private BigDecimal receivable;
+        private BigDecimal received;
+        private BigDecimal arrears;
+        private Boolean hasArrears;
     }
 }

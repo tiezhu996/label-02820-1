@@ -26,15 +26,25 @@
         </el-form-item>
       </el-form>
     </div>
-    
+
     <div class="table-area">
       <div class="table-toolbar">
         <el-button type="primary" @click="handleAdd" v-if="isAdmin">新增业主</el-button>
         <el-button type="success" @click="showImportDialog = true" v-if="isAdmin">Excel导入</el-button>
         <el-button type="info" @click="handleDownloadTemplate" v-if="isAdmin">下载模板</el-button>
+        <el-button type="warning" :disabled="selectedArrearsOwners.length === 0" @click="openBatchGenerate">
+          批量生成催缴单 ({{ selectedArrearsOwners.length }})
+        </el-button>
       </div>
-      
-      <el-table :data="tableData" v-loading="loading" stripe style="width: 100%;">
+
+      <el-table
+        :data="tableData"
+        v-loading="loading"
+        stripe
+        style="width: 100%;"
+        @selection-change="handleSelectionChange"
+      >
+        <el-table-column type="selection" width="50" :selectable="isOwnerArrears" />
         <el-table-column prop="name" label="业主姓名" min-width="100" />
         <el-table-column prop="buildingNo" label="楼栋号" min-width="80" />
         <el-table-column prop="unitNo" label="单元号" min-width="80" />
@@ -44,6 +54,14 @@
         <el-table-column prop="moveInDate" label="入住时间" min-width="120">
           <template #default="{ row }">{{ formatDateValue(row.moveInDate) }}</template>
         </el-table-column>
+        <el-table-column label="累计欠费" min-width="110">
+          <template #default="{ row }">
+            <span v-if="row.cumulativeArrears > 0" class="danger-text" style="font-weight: bold;">
+              ￥{{ row.cumulativeArrears }}
+            </span>
+            <span v-else style="color: #67c23a;">无欠费</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="status" label="状态" min-width="80">
           <template #default="{ row }">
             <el-tag :type="row.status === 'OCCUPIED' ? 'success' : 'info'">
@@ -51,14 +69,22 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right" v-if="isAdmin">
+        <el-table-column label="操作" width="200" fixed="right" v-if="isAdmin">
           <template #default="{ row }">
             <el-button type="primary" link @click="handleEdit(row)">编辑</el-button>
             <el-button type="danger" link @click="handleDelete(row)">删除</el-button>
+            <el-button
+              v-if="row.cumulativeArrears > 0"
+              type="warning"
+              link
+              @click="openBatchGenerate([row.id])"
+            >
+              催缴
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
-      
+
       <div class="pagination-container">
         <el-pagination
           v-model:current-page="pagination.page"
@@ -71,7 +97,7 @@
         />
       </div>
     </div>
-    
+
     <el-dialog v-model="showDialog" :title="dialogTitle" width="500px" destroy-on-close>
       <el-form ref="formRef" :model="form" :rules="rules" label-width="100px">
         <el-form-item label="业主姓名" prop="name">
@@ -107,7 +133,7 @@
         <el-button type="primary" :loading="submitLoading" @click="handleSubmit">确定</el-button>
       </template>
     </el-dialog>
-    
+
     <el-dialog v-model="showImportDialog" title="Excel导入" width="500px">
       <el-upload
         ref="uploadRef"
@@ -128,6 +154,28 @@
         <el-button type="primary" :loading="importLoading" @click="handleImport">导入</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showReminderDialog" title="生成催缴单" width="500px" destroy-on-close>
+      <el-form label-width="100px">
+        <el-form-item label="已选业主">
+          <span>{{ pendingGenerateIds.length }} 户</span>
+        </el-form-item>
+        <el-form-item label="选择模板">
+          <el-select v-model="selectedTemplateId" placeholder="请选择催缴模板" style="width: 100%;">
+            <el-option
+              v-for="t in reminderTemplates"
+              :key="t.id"
+              :label="t.templateName"
+              :value="t.id"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showReminderDialog = false">取消</el-button>
+        <el-button type="primary" :loading="generating" @click="handleGenerateReminders">生成并预览</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -135,6 +183,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getOwnerList, createOwner, updateOwner, deleteOwner, importOwners, downloadTemplate } from '@/api/owner'
+import { getTemplates, batchGenerateReminders } from '@/api/template'
 import { useAuthStore } from '@/store/auth'
 import { formatDate as formatDateValue } from '@/utils'
 
@@ -144,13 +193,18 @@ const isAdmin = computed(() => authStore.isAdmin)
 const loading = ref(false)
 const submitLoading = ref(false)
 const importLoading = ref(false)
+const generating = ref(false)
 const tableData = ref([])
 const showDialog = ref(false)
 const showImportDialog = ref(false)
+const showReminderDialog = ref(false)
 const dialogTitle = ref('')
 const formRef = ref(null)
 const uploadRef = ref(null)
 const importFile = ref(null)
+const selectedArrearsOwners = ref([])
+const selectedTemplateId = ref(null)
+const reminderTemplates = ref([])
 
 const searchForm = reactive({
   name: '',
@@ -188,6 +242,7 @@ const rules = {
 
 const loadData = async () => {
   loading.value = true
+  selectedArrearsOwners.value = []
   try {
     const res = await getOwnerList({
       page: pagination.page,
@@ -247,7 +302,7 @@ const handleEdit = (row) => {
 const handleSubmit = async () => {
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
-  
+
   submitLoading.value = true
   try {
     const data = { ...form, moveInDate: formatDateValue(form.moveInDate) || null }
@@ -282,7 +337,7 @@ const handleImport = async () => {
     ElMessage.warning('请选择文件')
     return
   }
-  
+
   importLoading.value = true
   try {
     const res = await importOwners(importFile.value)
@@ -311,6 +366,54 @@ const handleDownloadTemplate = async () => {
   }
 }
 
+const isOwnerArrears = (row) => {
+  return row.cumulativeArrears > 0
+}
+
+const handleSelectionChange = (selection) => {
+  selectedArrearsOwners.value = selection.filter(s => s.cumulativeArrears > 0).map(s => s.id)
+}
+
+const pendingGenerateIds = ref([])
+
+const openBatchGenerate = async (ownerIds) => {
+  if (!reminderTemplates.value.length) {
+    const res = await getTemplates({ templateType: 'REMINDER' })
+    reminderTemplates.value = res.data
+  }
+  pendingGenerateIds.value = ownerIds && ownerIds.length > 0
+    ? [...new Set(ownerIds)]
+    : selectedArrearsOwners.value
+  selectedTemplateId.value = reminderTemplates.value[0]?.id || null
+  showReminderDialog.value = true
+}
+
+const handleGenerateReminders = async () => {
+  if (!selectedTemplateId.value) {
+    ElMessage.warning('请选择模板')
+    return
+  }
+  if (!pendingGenerateIds.value.length) {
+    ElMessage.warning('请先选择欠费户')
+    return
+  }
+  generating.value = true
+  try {
+    const res = await batchGenerateReminders({
+      ownerIds: pendingGenerateIds.value,
+      templateId: selectedTemplateId.value
+    })
+    showReminderDialog.value = false
+    const printWindow = window.open('', '_blank')
+    printWindow.document.write(res.data)
+    printWindow.document.close()
+    setTimeout(() => printWindow.print(), 300)
+    ElMessage.success('催缴单已生成，请在新窗口中查看和打印')
+  } finally {
+    generating.value = false
+  }
+}
+
 onMounted(() => {
   loadData()
 })
@@ -319,5 +422,8 @@ onMounted(() => {
 <style lang="scss" scoped>
 .table-toolbar {
   margin-bottom: 16px;
+}
+.danger-text {
+  color: #f56c6c;
 }
 </style>

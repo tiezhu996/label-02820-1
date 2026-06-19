@@ -6,13 +6,14 @@ import com.property.common.BusinessException;
 import com.property.common.ErrorCode;
 import com.property.common.Result;
 import com.property.config.AccountSetContext;
-import com.property.entity.Bill;
 import com.property.entity.Owner;
+import com.property.entity.Receivable;
 import com.property.entity.Template;
-import com.property.mapper.BillMapper;
 import com.property.mapper.OwnerMapper;
+import com.property.mapper.ReceivableMapper;
 import com.property.mapper.TemplateMapper;
 import jakarta.servlet.http.HttpServletResponse;
+import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -27,6 +28,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -37,15 +39,16 @@ public class TemplateController {
     
     private final TemplateMapper templateMapper;
     private final OwnerMapper ownerMapper;
-    private final BillMapper billMapper;
+    private final ReceivableMapper receivableMapper;
     
     @Value("${file.template-path}")
     private String templatePath;
     
     @GetMapping
     public Result<List<Template>> list() {
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
         LambdaQueryWrapper<Template> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(Template::getAccountSetId, AccountSetContext.getCurrentAccountSetId());
+        wrapper.eq(Template::getAccountSetId, accountSetId);
         return Result.success(templateMapper.selectList(wrapper));
     }
     
@@ -74,6 +77,14 @@ public class TemplateController {
     @PreAuthorize("hasRole('ADMIN')")
     @OperationLog(operation = "删除模板")
     public Result<Void> delete(@PathVariable Long id) {
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+        Template template = templateMapper.selectById(id);
+        if (template == null) {
+            throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "模板不存在");
+        }
+        if (!template.getAccountSetId().equals(accountSetId)) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "无权操作其他账套的模板");
+        }
         templateMapper.deleteById(id);
         return Result.success();
     }
@@ -83,6 +94,11 @@ public class TemplateController {
         Template template = templateMapper.selectById(id);
         if (template == null) {
             throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "模板不存在");
+        }
+
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+        if (!template.getAccountSetId().equals(accountSetId)) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "无权访问其他账套的模板");
         }
         
         String filename = template.getFilePath().substring(template.getFilePath().lastIndexOf("/") + 1);
@@ -99,28 +115,40 @@ public class TemplateController {
     
     @GetMapping("/{id}/preview")
     public Result<String> preview(@PathVariable Long id, @RequestParam Long ownerId) {
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+
         Template template = templateMapper.selectById(id);
         if (template == null) {
             throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "模板不存在");
+        }
+        if (!template.getAccountSetId().equals(accountSetId)) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "无权使用其他账套的模板");
         }
         
         Owner owner = ownerMapper.selectById(ownerId);
         if (owner == null) {
             throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "业主不存在");
         }
+        if (!owner.getAccountSetId().equals(accountSetId)) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "无权访问其他账套的业主");
+        }
+
+        String currentPeriod = resolveCurrentPeriodMonth(accountSetId);
         
-        // 获取业主欠费信息
-        LambdaQueryWrapper<Bill> billWrapper = new LambdaQueryWrapper<>();
-        billWrapper.eq(Bill::getOwnerId, ownerId)
-                   .in(Bill::getStatus, "UNPAID", "OVERDUE");
-        List<Bill> bills = billMapper.selectList(billWrapper);
+        LambdaQueryWrapper<Receivable> recWrapper = new LambdaQueryWrapper<>();
+        recWrapper.eq(Receivable::getAccountSetId, accountSetId)
+                  .eq(Receivable::getOwnerId, ownerId)
+                  .eq(Receivable::getPeriodMonth, currentPeriod);
+        List<Receivable> receivables = receivableMapper.selectList(recWrapper);
         
         BigDecimal totalArrears = BigDecimal.ZERO;
         StringBuilder billDetails = new StringBuilder();
-        for (Bill bill : bills) {
-            BigDecimal arrears = bill.getAmount().subtract(bill.getPaidAmount());
-            totalArrears = totalArrears.add(arrears);
-            billDetails.append(String.format("%s: ￥%s<br/>", bill.getFeeName(), arrears));
+        for (Receivable r : receivables) {
+            BigDecimal arrears = r.getAmount().subtract(r.getPaidAmount());
+            if (arrears.compareTo(BigDecimal.ZERO) > 0) {
+                totalArrears = totalArrears.add(arrears);
+                billDetails.append(String.format("%s: ￥%s<br/>", resolveFeeName(r.getFeeType()), arrears));
+            }
         }
         
         String html = generateNoticeHtml(template.getTemplateType(), owner, totalArrears, billDetails.toString());
@@ -133,16 +161,16 @@ public class TemplateController {
             case "VIOLATION" -> "违规通知单";
             default -> "通知单";
         };
-        
+
         String roomInfo = owner.getBuildingNo() + "栋" + owner.getUnitNo() + "单元" + owner.getRoomNo() + "室";
         String today = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy年MM月dd日"));
-        
+
         return """
             <style>
                 @page { size: A4; margin: 20mm; }
                 @media print { body { margin: 0; padding: 0; } }
             </style>
-            <div style="width: 210mm; min-height: 297mm; padding: 20mm; box-sizing: border-box; font-family: SimSun, serif; margin: 0 auto;">
+            <div style="width: 210mm; min-height: 297mm; padding: 20mm; box-sizing: border-box; font-family: SimSun, serif; margin: 0 auto; page-break-after: always;">
                 <h2 style="text-align: center; margin-bottom: 30px;">%s</h2>
                 <p style="margin-bottom: 20px; font-size: 14px;">尊敬的 <strong>%s</strong> 业主：</p>
                 <p style="text-indent: 2em; line-height: 2; font-size: 14px;">
@@ -163,5 +191,105 @@ public class TemplateController {
                 </div>
             </div>
             """.formatted(title, owner.getName(), roomInfo, billDetails, totalArrears, today);
+    }
+
+    @Data
+    public static class BatchGenerateRequest {
+        private List<Long> ownerIds;
+        private Long templateId;
+    }
+
+    @PostMapping("/batch-generate")
+    public Result<String> batchGenerate(@RequestBody BatchGenerateRequest request) {
+        if (request.getOwnerIds() == null || request.getOwnerIds().isEmpty()) {
+            return Result.fail("请选择业主");
+        }
+        if (request.getTemplateId() == null) {
+            return Result.fail("请选择模板");
+        }
+
+        Long accountSetId = AccountSetContext.getCurrentAccountSetId();
+
+        Template template = templateMapper.selectById(request.getTemplateId());
+        if (template == null) {
+            throw new BusinessException(ErrorCode.DATA_NOT_FOUND, "模板不存在");
+        }
+        if (!template.getAccountSetId().equals(accountSetId)) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "只能使用当前账套的模板");
+        }
+
+        String currentPeriod = resolveCurrentPeriodMonth(accountSetId);
+
+        StringBuilder allHtml = new StringBuilder();
+        allHtml.append("""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>批量催缴单</title>
+                <style>
+                    @page { size: A4; margin: 20mm; }
+                    @media print { body { margin: 0; padding: 0; } }
+                    body { font-family: SimSun, serif; }
+                </style>
+            </head>
+            <body>
+            """);
+
+        for (Long ownerId : request.getOwnerIds()) {
+            Owner owner = ownerMapper.selectById(ownerId);
+            if (owner == null) continue;
+            if (!owner.getAccountSetId().equals(accountSetId)) {
+                throw new BusinessException(ErrorCode.FORBIDDEN, "业主 " + owner.getName() + " 不属于当前账套");
+            }
+
+            LambdaQueryWrapper<Receivable> recWrapper = new LambdaQueryWrapper<>();
+            recWrapper.eq(Receivable::getAccountSetId, accountSetId)
+                      .eq(Receivable::getOwnerId, ownerId)
+                      .eq(Receivable::getPeriodMonth, currentPeriod);
+            List<Receivable> receivables = receivableMapper.selectList(recWrapper);
+
+            BigDecimal totalArrears = BigDecimal.ZERO;
+            StringBuilder billDetails = new StringBuilder();
+            for (Receivable r : receivables) {
+                BigDecimal arrears = r.getAmount().subtract(r.getPaidAmount());
+                if (arrears.compareTo(BigDecimal.ZERO) > 0) {
+                    totalArrears = totalArrears.add(arrears);
+                    billDetails.append(String.format("%s: ￥%s<br/>", resolveFeeName(r.getFeeType()), arrears));
+                }
+            }
+
+            if (totalArrears.compareTo(BigDecimal.ZERO) > 0) {
+                String noticeHtml = generateNoticeHtml(template.getTemplateType(), owner, totalArrears, billDetails.toString());
+                allHtml.append(noticeHtml);
+            }
+        }
+
+        allHtml.append("</body></html>");
+        return Result.success(allHtml.toString());
+    }
+
+    private String resolveCurrentPeriodMonth(Long accountSetId) {
+        LambdaQueryWrapper<Receivable> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(Receivable::getAccountSetId, accountSetId)
+               .orderByDesc(Receivable::getPeriodMonth)
+               .last("LIMIT 1");
+        Receivable latest = receivableMapper.selectOne(wrapper);
+        if (latest != null) {
+            return latest.getPeriodMonth();
+        }
+        return LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy-MM"));
+    }
+
+    private String resolveFeeName(String feeType) {
+        return switch (feeType) {
+            case "PROPERTY" -> "物业费";
+            case "PARKING" -> "车位费";
+            case "WATER" -> "水费";
+            case "ELECTRIC" -> "电费";
+            case "GAS" -> "燃气费";
+            case "HEATING" -> "暖气费";
+            default -> feeType;
+        };
     }
 }
